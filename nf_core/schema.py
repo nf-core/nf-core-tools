@@ -17,6 +17,7 @@ import time
 import webbrowser
 import yaml
 import copy
+import re
 
 import nf_core.list, nf_core.utils
 
@@ -37,6 +38,7 @@ class PipelineSchema(object):
         self.schema_params = []
         self.input_params = {}
         self.pipeline_params = {}
+        self.invalid_nextflow_config_default_parameters = []
         self.pipeline_manifest = {}
         self.schema_from_scratch = False
         self.no_prompts = False
@@ -206,6 +208,9 @@ class PipelineSchema(object):
         """
         Check that all default parameters in the schema are valid
         Ignores 'required' flag, as required parameters might have no defaults
+
+        Additional check that all parameters have defaults in nextflow.config and that
+        these are valid and adhere to guidelines
         """
         try:
             assert self.schema is not None
@@ -222,6 +227,68 @@ class PipelineSchema(object):
         except jsonschema.exceptions.ValidationError as e:
             raise AssertionError("Default parameters are invalid: {}".format(e.message))
         log.info("[green][✓] Default parameters look valid")
+
+        # Make sure every default parameter exists in the nextflow.config and is of correct type
+        if self.pipeline_params == {}:
+            self.get_wf_params()
+
+        # Collect parameters to ignore
+        if "schema_ignore_params" in self.pipeline_params:
+            params_ignore = self.pipeline_params.get("schema_ignore_params", "").strip("\"'").split(",")
+        else:
+            params_ignore = []
+
+        # Go over group keys
+        for group_key, group in schema_no_required["definitions"].items():
+            group_properties = group.get("properties")
+            for param in group_properties:
+                if param in params_ignore:
+                    continue
+                if param in self.pipeline_params:
+                    self.validate_config_default_parameter(
+                        param, group_properties[param]["type"], self.pipeline_params[param]
+                    )
+                else:
+                    self.invalid_nextflow_config_default_parameters.append(param)
+
+        # Go over ungrouped params if any exist
+        ungrouped_properties = self.schema.get("properties")
+        if ungrouped_properties:
+            for param in ungrouped_properties:
+                if param in params_ignore:
+                    continue
+                if param in self.pipeline_params:
+                    self.validate_config_default_parameter(
+                        param, ungrouped_properties[param]["type"], self.pipeline_params[param]
+                    )
+                else:
+                    self.invalid_nextflow_config_default_parameters.append(param)
+
+    def validate_config_default_parameter(self, param, schema_default_type, config_default):
+        """
+        Assure that default parameters in the nextflow.config are correctly set
+        by comparing them to their type in the schema
+        """
+        # if default is null, we're good
+        if config_default == "null":
+            return
+        # else check for allowed defaults
+        if schema_default_type == "string":
+            if config_default in ["false", "true", "''"]:
+                self.invalid_nextflow_config_default_parameters.append(param)
+        if schema_default_type == "boolean":
+            if not config_default in ["false", "true"]:
+                self.invalid_nextflow_config_default_parameters.append(param)
+        if schema_default_type == "integer":
+            try:
+                int(config_default)
+            except ValueError:
+                self.invalid_nextflow_config_default_parameters.append(param)
+        if schema_default_type == "number":
+            try:
+                float(config_default)
+            except ValueError:
+                self.invalid_nextflow_config_default_parameters.append(param)
 
     def validate_schema(self, schema=None):
         """
